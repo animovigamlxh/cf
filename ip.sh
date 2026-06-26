@@ -1,8 +1,8 @@
 #!/bin/bash
 
 INSTALL_PATH="/usr/local/bin/cfy_ip"
-# 使用硬编码的绝对路径，避免 ~ 符号在脚本中展开失败
-CONFIG_FILE="/root/cfy_config.json"
+# 统一修改为全系统最稳妥的全局配置路径
+CONFIG_FILE="/etc/cfy_config.json"
 
 if [ "$0" != "$INSTALL_PATH" ]; then
     echo "正在安装 [cfy 极致稳定+CF解析同步器 (安全配置文件版)]..."
@@ -48,10 +48,10 @@ check_deps() {
 load_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${RED}❌ 未找到本地配置文件: $CONFIG_FILE${NC}"
-        echo -e "${YELLOW}请先在 root 目录下创建该文件并填入 Cloudflare 密钥，命令如下：${NC}"
-        echo -e "${GREEN}cat << 'EOF' > /root/cfy_config.json"
+        echo -e "${YELLOW}请先在 VPS 上创建该文件并填入 Cloudflare 密钥，命令如下：${NC}"
+        echo -e "${GREEN}cat << 'EOF' > /etc/cfy_config.json"
         echo -e '{\n    "CF_TOKEN": "您的_Token",\n    "CF_ZONE_ID": "您的_Zone_ID",\n    "CF_RECORD_NAME": "cf.yylxjichang-online.top"\n}'
-        echo -e "EOF${NC}"
+        echo -e "EOF\nchmod 600 /etc/cfy_config.json${NC}"
         exit 1
     fi
 
