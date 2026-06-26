@@ -1,6 +1,7 @@
 #!/bin/bash
 
 INSTALL_PATH="/usr/local/bin/cfy_ip"
+# 修改为 root 目录下的配置文件路径
 CONFIG_FILE="/root/cfy_config.json"
 
 if [ "$0" != "$INSTALL_PATH" ]; then
@@ -47,7 +48,7 @@ check_deps() {
 load_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${RED}❌ 未找到本地配置文件: $CONFIG_FILE${NC}"
-        echo -e "${YELLOW}请先在 VPS 上创建该文件并填入 Cloudflare 密钥，格式如下：${NC}"
+        echo -e "${YELLOW}请先在 root 目录下创建该文件并填入 Cloudflare 密钥，格式如下：${NC}"
         echo '{"CF_TOKEN":"...", "CF_ZONE_ID":"...", "CF_RECORD_NAME":"cf.yylxjichang-online.top"}'
         exit 1
     fi
