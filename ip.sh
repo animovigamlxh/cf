@@ -1,35 +1,6 @@
 #!/bin/bash
 
-INSTALL_PATH="/usr/local/bin/cfy_ip"
-# 统一修改为全系统最稳妥的全局配置路径
-CONFIG_FILE="/etc/cfy_config.json"
-
-if [ "$0" != "$INSTALL_PATH" ]; then
-    echo "正在安装 [cfy 极致稳定+CF解析同步器 (安全配置文件版)]..."
-
-    if [ "$(id -u)" -ne 0 ]; then
-        echo "错误: 安装需要管理员权限。请使用 'sudo bash' 运行。"
-        exit 1
-    fi
-    
-    echo "正在将脚本写入到 $INSTALL_PATH..."
-    if [[ "$(basename "$0")" == "bash" || "$(basename "$0")" == "sh" || "$(basename "$0")" == "-bash" ]]; then
-        if ! cat /proc/self/fd/0 > "$INSTALL_PATH"; then echo "❌ 写入失败"; exit 1; fi
-    else
-        if ! cp "$0" "$INSTALL_PATH"; then echo "❌ 复制失败"; exit 1; fi
-    fi
-
-    if [ $? -eq 0 ]; then
-        chmod +x "$INSTALL_PATH"
-        echo "✅ 安装成功! 您现在可以随时运行 'cfy_ip' 命令。"
-        echo "---"
-        echo "首次运行..."
-        exec "$INSTALL_PATH"
-    else
-        exit 1
-    fi
-    exit 0
-fi
+CONFIG_FILE="/etc/cfy_config.yaml"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -37,29 +8,59 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 check_deps() {
-    for cmd in curl grep sed mktemp paste ping bc awk sort uniq jq; do
+    for cmd in curl grep sed mktemp paste ping bc awk sort uniq python3; do
         if ! command -v "$cmd" &> /dev/null; then
-            echo -e "${RED}错误: 命令 '$cmd' 未找到. 请先安装它(如 apt/yum install jq bc).${NC}"
+            # 如果没有 python3，尝试检查 python
+            if [ "$cmd" = "python3" ] && command -v python &> /dev/null; then
+                continue
+            fi
+            echo -e "${RED}错误: 命令 '$cmd' 未找到. 请先安装它(如 apt/yum install python3 bc).${NC}"
             exit 1
         fi
     done
 }
 
+# 利用 Python 极其轻量地解析 YAML，无需安装大块头 yq
+parse_yaml() {
+    local key=$1
+    python3 -c "
+import yaml, sys
+try:
+    with open('$CONFIG_FILE', 'r') as f:
+        cfg = yaml.safe_load(f)
+        print(cfg.get('$key', ''))
+except Exception:
+    # 退而求其次，如果没装 pyyaml，用标准库简易解析
+    try:
+        with open('$CONFIG_FILE', 'r') as f:
+            for line in f:
+                if line.strip().startswith('$key:'):
+                    print(line.split(':', 1)[1].strip().strip('\"\''))
+                    sys.exit(0)
+    except:
+        pass
+" 2>/dev/null
+}
+
 load_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${RED}❌ 未找到本地配置文件: $CONFIG_FILE${NC}"
-        echo -e "${YELLOW}请先在 VPS 上创建该文件并填入 Cloudflare 密钥，命令如下：${NC}"
-        echo -e "${GREEN}cat << 'EOF' > /etc/cfy_config.json"
-        echo -e '{\n    "CF_TOKEN": "您的_Token",\n    "CF_ZONE_ID": "您的_Zone_ID",\n    "CF_RECORD_NAME": "cf.yylxjichang-online.top"\n}'
-        echo -e "EOF\nchmod 600 /etc/cfy_config.json${NC}"
+        echo -e "${YELLOW}请先在 VPS 上创建该 YAML 文件，命令如下：${NC}"
+        echo -e "${GREEN}cat << 'EOF' > /etc/cfy_config.yaml"
+        echo -e 'CF_TOKEN: "您的_Token"\nCF_ZONE_ID: "您的_Zone_ID"\nCF_RECORD_NAME: "cf.yylxjichang-online.top"'
+        echo -e "EOF\nchmod 600 /etc/cfy_config.yaml${NC}"
         exit 1
     fi
 
-    CF_TOKEN=$(jq -r '.CF_TOKEN // empty' "$CONFIG_FILE")
-    CF_ZONE_ID=$(jq -r '.CF_ZONE_ID // empty' "$CONFIG_FILE")
-    CF_RECORD_NAME=$(jq -r '.CF_RECORD_NAME // "cf.yylxjichang-online.top"' "$CONFIG_FILE")
+    CF_TOKEN=$(parse_yaml "CF_TOKEN")
+    CF_ZONE_ID=$(parse_yaml "CF_ZONE_ID")
+    CF_RECORD_NAME=$(parse_yaml "CF_RECORD_NAME")
 
-    if [ -z "$CF_TOKEN" ] || [ -z "$CF_ZONE_ID" ] || [ "$CF_TOKEN" == "你的_Cloudflare_API_Token" ]; then
+    if [ -z "$CF_RECORD_NAME" ]; then
+        CF_RECORD_NAME="cf.yylxjichang-online.top"
+    fi
+
+    if [ -z "$CF_TOKEN" ] || [ -z "$CF_ZONE_ID" ] || [ "$CF_TOKEN" == "您的_Token" ]; then
         echo -e "${RED}❌ 配置文件中的 CF_TOKEN 或 CF_ZONE_ID 无效，请检查 $CONFIG_FILE${NC}"
         exit 1
     fi
@@ -147,12 +148,15 @@ sync_to_cloudflare() {
         -H "Authorization: Bearer ${CF_TOKEN}" \
         -H "Content-Type: application/json")
 
-    if [ "$(echo "$records" | jq -r '.success')" != "true" ]; then
-        echo -e "${RED}❌ 读取 Cloudflare 失败，请检查本地 JSON 配置中的 Token 或 Zone ID 是否正确。${NC}"
+    # 判断返回结果是否包含成功标志 (用 python 提取，替代 jq)
+    local is_success=$(python3 -c "import json; d=json.loads('''$records'''); print(d.get('success',''))" 2>/dev/null)
+    if [ "$is_success" != "True" ]; then
+        echo -e "${RED}❌ 读取 Cloudflare 失败，请检查本地 YAML 配置中的 Token 或 Zone ID 是否正确。${NC}"
         return 1
     fi
 
-    local record_ids=$(echo "$records" | jq -r '.result[].id')
+    # 提取所有旧记录的 ID
+    local record_ids=$(python3 -c "import json; d=json.loads('''$records'''); print('\n'.join([x['id'] for x in d.get('result',[])]))" 2>/dev/null)
     for id in $record_ids; do
         echo "   [-] 正在清理旧记录 ID: $id"
         curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${id}" \
@@ -169,7 +173,8 @@ sync_to_cloudflare() {
             -H "Content-Type: application/json" \
             --data "{\"type\":\"A\",\"name\":\"${CF_RECORD_NAME}\",\"content\":\"${ip}\",\"ttl\":60,\"proxied\":false}")
         
-        if [ "$(echo "$post_res" | jq -r '.success')" == "true" ]; then
+        local post_success=$(python3 -c "import json; d=json.loads('''$post_res'''); print(d.get('success',''))" 2>/dev/null)
+        if [ "$post_success" == "True" ]; then
             echo -e "   [+] ${GREEN}第 [$final_count] 个同步成功:${NC} $ip ($isp) | 速度: $mb_sp MB/s"
         else
             echo -e "   [x] ${RED}第 [$final_count] 个同步失败:${NC} $ip"
@@ -183,10 +188,11 @@ sync_to_cloudflare() {
 
 main() {
     echo -e "${GREEN}=================================================="
-    echo -e " IPv4 全量极致稳定测速器 + CF DNS 自动同步 (安全版)"
+    echo -e " IPv4 全量极致稳定测速器 + CF DNS 自动同步 (YAML版)"
     echo -e "==================================================${NC}"
     echo ""
 
+    check_deps
     load_config
     get_optimized_ips || exit 1
     test_and_sort
@@ -204,5 +210,10 @@ main() {
     echo "---"
 }
 
-check_deps
+# 注册为本地全局命令
+if [ "$0" != "$INSTALL_PATH" ] && [ "$0" != "cfy_ip" ]; then
+    cp "$0" "$INSTALL_PATH" 2>/dev/null || cat "$0" > "$INSTALL_PATH"
+    chmod +x "$INSTALL_PATH"
+fi
+
 main
