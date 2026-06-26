@@ -10,7 +10,6 @@ NC='\033[0m'
 check_deps() {
     for cmd in curl grep sed mktemp paste ping bc awk sort uniq python3; do
         if ! command -v "$cmd" &> /dev/null; then
-            # 如果没有 python3，尝试检查 python
             if [ "$cmd" = "python3" ] && command -v python &> /dev/null; then
                 continue
             fi
@@ -20,25 +19,18 @@ check_deps() {
     done
 }
 
-# 利用 Python 极其轻量地解析 YAML，无需安装大块头 yq
 parse_yaml() {
     local key=$1
     python3 -c "
-import yaml, sys
+import sys
 try:
     with open('$CONFIG_FILE', 'r') as f:
-        cfg = yaml.safe_load(f)
-        print(cfg.get('$key', ''))
+        for line in f:
+            if line.strip().startswith('$key:'):
+                print(line.split(':', 1)[1].strip().strip('\"\''))
+                sys.exit(0)
 except Exception:
-    # 退而求其次，如果没装 pyyaml，用标准库简易解析
-    try:
-        with open('$CONFIG_FILE', 'r') as f:
-            for line in f:
-                if line.strip().startswith('$key:'):
-                    print(line.split(':', 1)[1].strip().strip('\"\''))
-                    sys.exit(0)
-    except:
-        pass
+    pass
 " 2>/dev/null
 }
 
@@ -56,7 +48,7 @@ load_config() {
     CF_ZONE_ID=$(parse_yaml "CF_ZONE_ID")
     CF_RECORD_NAME=$(parse_yaml "CF_RECORD_NAME")
 
-    if [ -z "$CF_RECORD_NAME" ]; then
+    if [ -z "$CF_RECORD_NAME" ] || [ "$CF_RECORD_NAME" == "None" ]; then
         CF_RECORD_NAME="cf.yylxjichang-online.top"
     fi
 
@@ -148,14 +140,12 @@ sync_to_cloudflare() {
         -H "Authorization: Bearer ${CF_TOKEN}" \
         -H "Content-Type: application/json")
 
-    # 判断返回结果是否包含成功标志 (用 python 提取，替代 jq)
     local is_success=$(python3 -c "import json; d=json.loads('''$records'''); print(d.get('success',''))" 2>/dev/null)
     if [ "$is_success" != "True" ]; then
         echo -e "${RED}❌ 读取 Cloudflare 失败，请检查本地 YAML 配置中的 Token 或 Zone ID 是否正确。${NC}"
         return 1
     fi
 
-    # 提取所有旧记录的 ID
     local record_ids=$(python3 -c "import json; d=json.loads('''$records'''); print('\n'.join([x['id'] for x in d.get('result',[])]))" 2>/dev/null)
     for id in $record_ids; do
         echo "   [-] 正在清理旧记录 ID: $id"
@@ -209,11 +199,5 @@ main() {
     rm -f "$raw_data_file" "$result_file"
     echo "---"
 }
-
-# 注册为本地全局命令
-if [ "$0" != "$INSTALL_PATH" ] && [ "$0" != "cfy_ip" ]; then
-    cp "$0" "$INSTALL_PATH" 2>/dev/null || cat "$0" > "$INSTALL_PATH"
-    chmod +x "$INSTALL_PATH"
-fi
 
 main
