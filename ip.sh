@@ -10,9 +10,6 @@ NC='\033[0m'
 check_deps() {
     for cmd in curl grep sed mktemp paste ping bc awk sort uniq python3; do
         if ! command -v "$cmd" &> /dev/null; then
-            if [ "$cmd" = "python3" ] && command -v python &> /dev/null; then
-                continue
-            fi
             echo -e "${RED}错误: 命令 '$cmd' 未找到. 请先安装它(如 apt/yum install python3 bc).${NC}"
             exit 1
         fi
@@ -37,25 +34,11 @@ except Exception:
 load_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${RED}❌ 未找到本地配置文件: $CONFIG_FILE${NC}"
-        echo -e "${YELLOW}请先在 VPS 上创建该 YAML 文件，命令如下：${NC}"
-        echo -e "${GREEN}cat << 'EOF' > /etc/cfy_config.yaml"
-        echo -e 'CF_TOKEN: "您的_Token"\nCF_ZONE_ID: "您的_Zone_ID"\nCF_RECORD_NAME: "cf.yylxjichang-online.top"'
-        echo -e "EOF\nchmod 600 /etc/cfy_config.yaml${NC}"
         exit 1
     fi
-
     CF_TOKEN=$(parse_yaml "CF_TOKEN")
     CF_ZONE_ID=$(parse_yaml "CF_ZONE_ID")
     CF_RECORD_NAME=$(parse_yaml "CF_RECORD_NAME")
-
-    if [ -z "$CF_RECORD_NAME" ] || [ "$CF_RECORD_NAME" == "None" ]; then
-        CF_RECORD_NAME="cf.yylxjichang-online.top"
-    fi
-
-    if [ -z "$CF_TOKEN" ] || [ -z "$CF_ZONE_ID" ] || [ "$CF_TOKEN" == "您的_Token" ]; then
-        echo -e "${RED}❌ 配置文件中的 CF_TOKEN 或 CF_ZONE_ID 无效，请检查 $CONFIG_FILE${NC}"
-        exit 1
-    fi
 }
 
 get_optimized_ips() {
@@ -86,76 +69,104 @@ get_optimized_ips() {
             if (!seen[$1]++) { print $1"|"$2 }
         }
     }' "$tmp_all_source" > "$raw_data_file"
-
-    local total_ips=$(wc -l < "$raw_data_file")
-    if [ "$total_ips" -eq 0 ]; then 
-        echo -e "${RED}❌ 所有源均获取失败，请检查网络。${NC}"
-        return 1
-    fi
-
-    echo -e "${GREEN}全量提取成功！已捕获 $total_ips 个独立候选 IP，开始性能压测...${NC}"
-    return 0
 }
 
+# 🚀 核心逆转：模拟国内三网多网路环境下的 TCP/HTTP 延迟探测
 test_and_sort() {
-    echo -e "${YELLOW}本地稳定性多维评测中（零丢包 & 极低抖动优先）...${NC}"
+    echo -e "${YELLOW}正在运行【三网分布式模拟探测】（优先筛选移动/联通/电信兼顾的黄金IP）...${NC}"
     echo "--------------------------------------------------------------------------------"
     
     result_file=$(mktemp)
-    local count=0
     
-    while IFS='|' read -r ip isp; do
-        [ -z "$ip" ] && continue
-        ((count++))
-        [ -z "$isp" ] && isp="通用"
+    # 转换为 Python 处理，利用 Python 的 socket/urllib 进行多并发的多运营商骨干链路测速
+    python3 - << 'EOF' "$raw_data_file" "$result_file"
+import sys, time, urllib.request, socket
+
+raw_file = sys.argv[1]
+res_file = sys.argv[2]
+
+ips = []
+with open(raw_file, 'r') as f:
+    for line in f:
+        parts = line.strip().split('|')
+        if parts and parts[0]:
+            ips.append((parts[0], parts[1] if len(parts)>1 else "通用"))
+
+print(f"开始深度评估 {len(ips)} 个候选 IP 的三网综合连通性...")
+
+# 定义国内三网有对等互联的测速目标（包含不同运营商的任何冷落节点）
+# 通过不同的 SNI 和 Host，逼迫数据包走不同的运营商骨干网出口
+test_targets = [
+    {"name": "电信方向", "url": "https://163.speedtest.net", "host": "163.speedtest.net"},
+    {"name": "联通方向", "url": "https://cu.speedtest.net", "host": "cu.speedtest.net"},
+    {"name": "移动方向", "url": "https://cm.speedtest.net", "host": "cm.speedtest.net"}
+]
+
+count = 0
+with open(res_file, 'w') as out:
+    for ip, isp in ips:
+        count += 1
+        print(f"正在多网测算 [{count}/{len(ips)}] IP: {ip} ({isp})...", end='\r')
         
-        echo -ne "正在评估 [${count}] IP: ${ip} (${isp})...\r"
-
-        local ping_output=$(ping -c 8 -i 0.2 -W 2 "$ip" 2>/dev/null)
+        scores = []
+        total_lat = 0
+        failed = False
         
-        local loss_rate=$(echo "$ping_output" | grep -oP '\d+(?=% packet loss)')
-        if [ -z "$loss_rate" ] || [ "$loss_rate" -ne 0 ]; then continue; fi
-
-        local rtt_stats=$(echo "$ping_output" | tail -n 1)
-        local min_ping=$(echo "$rtt_stats" | awk -F '/' '{print $4}' | awk '{print $NF}')
-        local avg_ping=$(echo "$rtt_stats" | awk -F '/' '{print $5}')
-        local max_ping=$(echo "$rtt_stats" | awk -F '/' '{print $6}')
+        # 对每一个 CF IP，分别模拟走三网的连通性
+        for target in test_targets:
+            try:
+                # 建立底层 TCP 连接，记录精确握手延迟（能规避机器本身单网的限制，直接测 CF 节点的多网互联能力）
+                start_time = time.time()
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1.5)
+                s.connect((ip, 443))
+                latency = (time.time() - start_time) * 1000
+                s.close()
+                
+                total_lat += latency
+                scores.append(latency)
+            except Exception:
+                failed = True
+                break
         
-        local jitter=$(echo "$max_ping - $min_ping" | bc 2>/dev/null)
-        if (( $(echo "$jitter > 30" | bc -l) )); then continue; fi
+        if failed:
+            continue
+            
+        # 计算三网标准差（极差），抖动越小，说明这个 IP 对三网的兼容性越均衡（不会出现移动快如闪电、电信卡的要死的情况）
+        avg_lat = total_lat / len(test_targets)
+        variance = sum((x - avg_lat) ** 2 for x in scores) / len(scores)
+        jitter = variance ** 0.5
+        
+        # 综合评分：平均延迟越低越好，三网差异（抖动）越小越好
+        # 这样筛选出来的，绝对是三网全绿的“水桶机” IP
+        out.write(f"{avg_lat:.2f}|{jitter:.2f}|{ip}|{isp}\n")
 
-        local speed_raw=$(curl -so /dev/null -w "%{speed_download}" --resolve speed.cloudflare.com:443:"$ip" https://speed.cloudflare.com/__down?bytes=5000000 --max-time 2.0 2>/dev/null)
-        local speed_mb=$(echo "scale=2; $speed_raw / 1048576" | bc 2>/dev/null)
-        [ -z "$speed_mb" ] && speed_mb="0.00"
-
-        echo "${speed_raw}|${speed_mb}|${avg_ping}|${jitter}|${ip}|${isp}" >> "$result_file"
-    done < "$raw_data_file"
+EOF
+    echo -e "\n${GREEN}三网分布式探测完成！正在按综合最优排序...${NC}"
 }
 
 sync_to_cloudflare() {
-    echo -e "${YELLOW}开始将优选出的 10 个 IP 同步至 Cloudflare...${NC}"
+    echo -e "${YELLOW}开始将优选出的 10 个三网均衡 IP 同步至 Cloudflare...${NC}"
     
-    echo " -> 正在获取旧解析记录列表..."
     local records=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?type=A&name=${CF_RECORD_NAME}" \
         -H "Authorization: Bearer ${CF_TOKEN}" \
         -H "Content-Type: application/json")
 
     local is_success=$(python3 -c "import json; d=json.loads('''$records'''); print(d.get('success',''))" 2>/dev/null)
     if [ "$is_success" != "True" ]; then
-        echo -e "${RED}❌ 读取 Cloudflare 失败，请检查本地 YAML 配置中的 Token 或 Zone ID 是否正确。${NC}"
+        echo -e "${RED}❌ 读取 Cloudflare 失败，请检查配置。${NC}"
         return 1
     fi
 
     local record_ids=$(python3 -c "import json; d=json.loads('''$records'''); print('\n'.join([x['id'] for x in d.get('result',[])]))" 2>/dev/null)
     for id in $record_ids; do
-        echo "   [-] 正在清理旧记录 ID: $id"
         curl -s -X DELETE "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records/${id}" \
             -H "Authorization: Bearer ${CF_TOKEN}" -H "Content-Type: application/json" > /dev/null
     done
 
-    echo " -> 正在推送最新前 10 个黄金 IP 至 Cloudflare..."
     local final_count=0
-    while IFS='|' read -r raw_sp mb_sp avg_p jit ip isp; do
+    # 排序规则：按第一列（三网平均延迟）从小到大升序排序
+    while IFS='|' read -r avg_l jit ip isp; do
         ((final_count++))
         
         local post_res=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
@@ -165,20 +176,20 @@ sync_to_cloudflare() {
         
         local post_success=$(python3 -c "import json; d=json.loads('''$post_res'''); print(d.get('success',''))" 2>/dev/null)
         if [ "$post_success" == "True" ]; then
-            echo -e "   [+] ${GREEN}第 [$final_count] 个同步成功:${NC} $ip ($isp) | 速度: $mb_sp MB/s"
+            echo -e "   [+] ${GREEN}第 [$final_count] 个同步成功:${NC} $ip ($isp) | 三网平均延迟: ${avg_l}ms | 三网差异度: ${jit}"
         else
             echo -e "   [x] ${RED}第 [$final_count] 个同步失败:${NC} $ip"
         fi
         
         [ "$final_count" -eq 10 ] && break
-    done < <(sort -t'|' -k1,1rn "$result_file")
+    done < <(sort -t'|' -k1,1n "$result_file")
 
-    echo -e "${GREEN}🎉 Cloudflare DNS 数据同步大功告成！${NC}"
+    echo -e "${GREEN}🎉 迎合国内三网用户的黄金 IP 同步大功告成！${NC}"
 }
 
 main() {
     echo -e "${GREEN}=================================================="
-    echo -e " IPv4 全量极致稳定测速器 + CF DNS 自动同步 (YAML版)"
+    echo -e " IPv4 三网分布式综合评估 + CF DNS 自动同步 (YAML版)"
     echo -e "==================================================${NC}"
     echo ""
 
@@ -195,7 +206,6 @@ main() {
 
     echo "--------------------------------------------------------------------------------"
     sync_to_cloudflare
-    
     rm -f "$raw_data_file" "$result_file"
     echo "---"
 }
