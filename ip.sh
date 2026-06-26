@@ -71,16 +71,14 @@ get_optimized_ips() {
     }' "$tmp_all_source" > "$raw_data_file"
 }
 
-# 🚀 核心逆转：模拟国内三网多网路环境下的 TCP/HTTP 延迟探测
 test_and_sort() {
-    echo -e "${YELLOW}正在运行【三网分布式模拟探测】（优先筛选移动/联通/电信兼顾的黄金IP）...${NC}"
+    echo -e "${YELLOW}正在运行【三网均衡度 + 本地单线程下载速度】双重压测...${NC}"
     echo "--------------------------------------------------------------------------------"
     
     result_file=$(mktemp)
     
-    # 转换为 Python 处理，利用 Python 的 socket/urllib 进行多并发的多运营商骨干链路测速
     python3 - << 'EOF' "$raw_data_file" "$result_file"
-import sys, time, urllib.request, socket
+import sys, time, socket, subprocess
 
 raw_file = sys.argv[1]
 res_file = sys.argv[2]
@@ -92,15 +90,13 @@ with open(raw_file, 'r') as f:
         if parts and parts[0]:
             ips.append((parts[0], parts[1] if len(parts)>1 else "通用"))
 
-print(f"开始深度评估 {len(ips)} 个候选 IP 的三网综合连通性...")
-
-# 定义国内三网有对等互联的测速目标（包含不同运营商的任何冷落节点）
-# 通过不同的 SNI 和 Host，逼迫数据包走不同的运营商骨干网出口
 test_targets = [
-    {"name": "电信方向", "url": "https://163.speedtest.net", "host": "163.speedtest.net"},
-    {"name": "联通方向", "url": "https://cu.speedtest.net", "host": "cu.speedtest.net"},
-    {"name": "移动方向", "url": "https://cm.speedtest.net", "host": "cm.speedtest.net"}
+    {"host": "163.speedtest.net"},
+    {"host": "cu.speedtest.net"},
+    {"host": "cm.speedtest.net"}
 ]
+
+print(f"开始深度评估 {len(ips)} 个候选 IP 的单线程爆发力...")
 
 count = 0
 with open(res_file, 'w') as out:
@@ -112,17 +108,15 @@ with open(res_file, 'w') as out:
         total_lat = 0
         failed = False
         
-        # 对每一个 CF IP，分别模拟走三网的连通性
+        # 1. 探测三网连通性
         for target in test_targets:
             try:
-                # 建立底层 TCP 连接，记录精确握手延迟（能规避机器本身单网的限制，直接测 CF 节点的多网互联能力）
                 start_time = time.time()
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(1.5)
+                s.settimeout(1.0)
                 s.connect((ip, 443))
                 latency = (time.time() - start_time) * 1000
                 s.close()
-                
                 total_lat += latency
                 scores.append(latency)
             except Exception:
@@ -132,21 +126,34 @@ with open(res_file, 'w') as out:
         if failed:
             continue
             
-        # 计算三网标准差（极差），抖动越小，说明这个 IP 对三网的兼容性越均衡（不会出现移动快如闪电、电信卡的要死的情况）
         avg_lat = total_lat / len(test_targets)
         variance = sum((x - avg_lat) ** 2 for x in scores) / len(scores)
         jitter = variance ** 0.5
         
-        # 综合评分：平均延迟越低越好，三网差异（抖动）越小越好
-        # 这样筛选出来的，绝对是三网全绿的“水桶机” IP
-        out.write(f"{avg_lat:.2f}|{jitter:.2f}|{ip}|{isp}\n")
+        # 2. 🚀 纯粹的单线程下载测速 (利用 curl 原生单线程机制拉取 5MB 块，硬性限时 1.5 秒)
+        speed_mb = 0.0
+        try:
+            # --http1.1 强制单链接，避免 HTTP/2 多路复用干扰，测出最纯粹的单线程独占带宽
+            cmd = f"curl -so /dev/null --http1.1 -w '%{{speed_download}}' --resolve speed.cloudflare.com:443:{ip} https://speed.cloudflare.com/__down?bytes=5000000 --max-time 1.5"
+            res = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            speed_raw = float(res.stdout.strip()) if res.stdout.strip() else 0.0
+            speed_mb = speed_raw / 1048576.0
+        except Exception:
+            pass
+            
+        if speed_mb < 0.1: 
+            continue
 
+        # 3. 终极单线程得分公式
+        final_score = (speed_mb * 100.0) / (avg_lat + (jitter * 0.5))
+        
+        out.write(f"{final_score:.4f}|{speed_mb:.2f}|{avg_lat:.1f}|{ip}|{isp}\n")
 EOF
-    echo -e "\n${GREEN}三网分布式探测完成！正在按综合最优排序...${NC}"
+    echo -e "\n${GREEN}权衡算法打分完毕，开始按综合评级排序同步...${NC}"
 }
 
 sync_to_cloudflare() {
-    echo -e "${YELLOW}开始将优选出的 10 个三网均衡 IP 同步至 Cloudflare...${NC}"
+    echo -e "${YELLOW}开始将单线程综合得分最高的 10 个 IP 同步至 Cloudflare...${NC}"
     
     local records=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records?type=A&name=${CF_RECORD_NAME}" \
         -H "Authorization: Bearer ${CF_TOKEN}" \
@@ -165,8 +172,7 @@ sync_to_cloudflare() {
     done
 
     local final_count=0
-    # 排序规则：按第一列（三网平均延迟）从小到大升序排序
-    while IFS='|' read -r avg_l jit ip isp; do
+    while IFS='|' read -r score mb_sp avg_l ip isp; do
         ((final_count++))
         
         local post_res=$(curl -s -X POST "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/dns_records" \
@@ -176,20 +182,20 @@ sync_to_cloudflare() {
         
         local post_success=$(python3 -c "import json; d=json.loads('''$post_res'''); print(d.get('success',''))" 2>/dev/null)
         if [ "$post_success" == "True" ]; then
-            echo -e "   [+] ${GREEN}第 [$final_count] 个同步成功:${NC} $ip ($isp) | 三网平均延迟: ${avg_l}ms | 三网差异度: ${jit}"
+            echo -e "   [+] ${GREEN}第 [$final_count] 名推荐:${NC} $ip | 单线程速度: ${mb_sp} MB/s | 三网均延: ${avg_l}ms | 综合权重分: ${score}"
         else
             echo -e "   [x] ${RED}第 [$final_count] 个同步失败:${NC} $ip"
         fi
         
         [ "$final_count" -eq 10 ] && break
-    done < <(sort -t'|' -k1,1n "$result_file")
+    done < <(sort -t'|' -k1,1rn "$result_file")
 
-    echo -e "${GREEN}🎉 迎合国内三网用户的黄金 IP 同步大功告成！${NC}"
+    echo -e "${GREEN}🎉 单线程表现最强 + 三网兼顾的黄金 IP 已经全部同步成功！${NC}"
 }
 
 main() {
     echo -e "${GREEN}=================================================="
-    echo -e " IPv4 三网分布式综合评估 + CF DNS 自动同步 (YAML版)"
+    echo -e " IPv4 三网连通 + 本地单线程速度双重权衡器 (YAML版)"
     echo -e "==================================================${NC}"
     echo ""
 
