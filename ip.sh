@@ -1,7 +1,7 @@
 #!/bin/bash
 
 INSTALL_PATH="/usr/local/bin/cfy_ip"
-# 修改为 root 目录下的配置文件路径
+# 使用硬编码的绝对路径，避免 ~ 符号在脚本中展开失败
 CONFIG_FILE="/root/cfy_config.json"
 
 if [ "$0" != "$INSTALL_PATH" ]; then
@@ -48,8 +48,10 @@ check_deps() {
 load_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         echo -e "${RED}❌ 未找到本地配置文件: $CONFIG_FILE${NC}"
-        echo -e "${YELLOW}请先在 root 目录下创建该文件并填入 Cloudflare 密钥，格式如下：${NC}"
-        echo '{"CF_TOKEN":"...", "CF_ZONE_ID":"...", "CF_RECORD_NAME":"cf.yylxjichang-online.top"}'
+        echo -e "${YELLOW}请先在 root 目录下创建该文件并填入 Cloudflare 密钥，命令如下：${NC}"
+        echo -e "${GREEN}cat << 'EOF' > /root/cfy_config.json"
+        echo -e '{\n    "CF_TOKEN": "您的_Token",\n    "CF_ZONE_ID": "您的_Zone_ID",\n    "CF_RECORD_NAME": "cf.yylxjichang-online.top"\n}'
+        echo -e "EOF${NC}"
         exit 1
     fi
 
