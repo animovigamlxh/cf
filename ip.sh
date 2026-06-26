@@ -1,7 +1,7 @@
 #!/bin/bash
 
 INSTALL_PATH="/usr/local/bin/cfy_ip"
-CONFIG_FILE="/etc/cfy_config.json"
+CONFIG_FILE="/root/cfy_config.json"
 
 if [ "$0" != "$INSTALL_PATH" ]; then
     echo "正在安装 [cfy 极致稳定+CF解析同步器 (安全配置文件版)]..."
